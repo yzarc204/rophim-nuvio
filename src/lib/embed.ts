@@ -187,6 +187,131 @@ async function extractStreamcUrl(
   return { url: streamUrl, referer, origin };
 }
 
+// ── playembed.vip ─────────────────────────────────────────────────────────────
+
+const PLAYEMBED_XOR_KEY = 'onflix_secure_stream_v2_2026';
+
+/**
+ * Decode chuỗi hex XOR của playembed.vip.
+ * Format: "enc_<hex>" — mỗi byte hex XOR với ký tự tương ứng của key.
+ */
+function decodePlayembedEnc(enc: string): string {
+  const hex = enc.startsWith('enc_') ? enc.slice(4) : enc;
+  let result = '';
+  for (let i = 0; i < hex.length; i += 2) {
+    const byte = parseInt(hex.slice(i, i + 2), 16);
+    const keyChar = PLAYEMBED_XOR_KEY.charCodeAt((i / 2) % PLAYEMBED_XOR_KEY.length);
+    result += String.fromCharCode(byte ^ keyChar);
+  }
+  return result;
+}
+
+/**
+ * Extract HLS m3u8 URL từ playembed.vip player.
+ *
+ * Flow:
+ *  1. Fetch HTML page → tìm `initialM3u8` (dạng enc_<hex>)
+ *  2. Decode XOR → CDN URL (dạng URL-encoded)
+ *  3. Fetch CDN JSON manifest → danh sách qualities
+ *  4. Fetch `<cdnUrl>&q=<qid>` → m3u8 playlist thực sự (dạng JSON { play_vid })
+ */
+export async function extractHlsFromPlayembed(
+  embedUrl: string,
+  cache: CacheStore,
+  ctx: ExecutionContext,
+  preferQuality: 'best' | '720p' | '480p' = 'best'
+): Promise<ExtractedHls | null> {
+  if (!embedUrl) return null;
+
+  let parsedEmbed: URL;
+  try {
+    parsedEmbed = new URL(embedUrl);
+  } catch {
+    return null;
+  }
+
+  const referer = `${parsedEmbed.protocol}//${parsedEmbed.host}/`;
+
+  // 1. Fetch embed page HTML
+  const html = await cachedFetchText(embedUrl, cache, ctx, {
+    headers: {
+      Referer: referer,
+      'User-Agent': config.browserUserAgent,
+      'Accept-Language': 'vi-VN,vi;q=0.9',
+    },
+  });
+  if (!html) return null;
+
+  // 2. Tìm và decode initialM3u8
+  const encMatch = html.match(/"initialM3u8":"(enc_[0-9a-f]+)"/);
+  if (!encMatch || !encMatch[1]) return null;
+
+  const decoded = decodePlayembedEnc(encMatch[1]);
+  // Kết quả có thể là URL-encoded
+  const cdnUrl = decoded.startsWith('http') ? decoded : decodeURIComponent(decoded);
+  if (!cdnUrl.startsWith('http')) return null;
+
+  // 3. Fetch CDN JSON manifest
+  const manifest = await cachedFetchText(cdnUrl, cache, ctx, {
+    headers: {
+      Referer: referer,
+      'User-Agent': config.browserUserAgent,
+    },
+  });
+  if (!manifest) return null;
+
+  let manifestJson: { type?: string; qualities?: Array<{ qid: number; quality: string }> };
+  try {
+    manifestJson = JSON.parse(manifest);
+  } catch {
+    return null;
+  }
+
+  // Nếu không phải master manifest, trả về URL gốc
+  if (manifestJson.type !== 'master' || !Array.isArray(manifestJson.qualities) || manifestJson.qualities.length === 0) {
+    return null;
+  }
+
+  // 4. Chọn quality phù hợp
+  const qualities = manifestJson.qualities;
+  let selectedQid = qualities[0]!.qid; // mặc định: qid đầu tiên (thường 1080p)
+
+  if (preferQuality !== 'best') {
+    const found = qualities.find((q) => q.quality === preferQuality);
+    if (found) selectedQid = found.qid;
+  }
+
+  // 5. Fetch stream URL với quality đã chọn
+  const streamUrl = `${cdnUrl}&q=${selectedQid}`;
+  const streamData = await cachedFetchText(streamUrl, cache, ctx, {
+    headers: {
+      Referer: referer,
+      'User-Agent': config.browserUserAgent,
+    },
+  });
+  if (!streamData) return null;
+
+  // Response có thể là JSON { play_vid: "<m3u8 content>" } hoặc m3u8 plaintext
+  if (streamData.trimStart().startsWith('{')) {
+    try {
+      const json: { play_vid?: string } = JSON.parse(streamData);
+      if (json.play_vid) {
+        // Inline m3u8 content — trả về URL gốc + content
+        return { url: streamUrl, referer, origin: parsedEmbed.origin, m3u8Content: json.play_vid };
+      }
+    } catch {
+      // Không parse được → fallthrough
+    }
+  }
+
+  // Plaintext m3u8
+  if (streamData.includes('#EXTM3U')) {
+    return { url: streamUrl, referer, origin: parsedEmbed.origin, m3u8Content: streamData };
+  }
+
+  return null;
+}
+
 function extractM3u8FromHtml(html: string): string | null {
   // Pattern: any quoted string ending in .m3u8 (with optional query string)
   // PHP: /(https?:\/\/[^\s\'"<>]+\.m3u8[^\s\'"<>]*)/i

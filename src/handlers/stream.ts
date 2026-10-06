@@ -4,7 +4,7 @@
 
 import type { CacheStore } from '../lib/cache.js';
 import { ID_PREFIX, parseId, parseStremioId } from '../lib/id.js';
-import { extractHlsFromEmbed } from '../lib/embed.js';
+import { extractHlsFromEmbed, extractHlsFromPlayembed } from '../lib/embed.js';
 import { getProviders } from '../providers/registry.js';
 import { KKPhimProvider } from '../providers/kkphim.js';
 import { MotchillProvider } from '../providers/motchill.js';
@@ -126,14 +126,19 @@ async function buildStreams(
     }
 
     if (ep.embed_url) {
-      const resolved = await extractHlsFromEmbed(ep.embed_url, cache, ctx, workerOrigin);
+      const isPlayembed = ep.embed_url.includes('playembed.vip');
+
+      const resolved = isPlayembed
+        ? await extractHlsFromPlayembed(ep.embed_url, cache, ctx)
+        : await extractHlsFromEmbed(ep.embed_url, cache, ctx, workerOrigin);
+
       if (!resolved) continue;
 
       if (resolved.url.includes('/hls/streamc.png')) {
         // URL đã là streamc proxy endpoint (tự chứa hash+sUb) → dùng thẳng
         stream.url = resolved.url;
       } else if (resolved.m3u8Content) {
-        // Content đã decrypt nhưng không có workerOrigin → wrap qua playlist proxy với cache
+        // Inline m3u8 content (playembed hoặc streamc fallback) → cache + wrap proxy
         cache.put('streamc_plain:' + resolved.url, resolved.m3u8Content, ctx);
         stream.url = `${workerOrigin}/hls/playlist.png?url=${encodeURIComponent(resolved.url)}&origin=${encodeURIComponent(workerOrigin)}&ref=${encodeURIComponent(resolved.referer)}`;
       } else {

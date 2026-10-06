@@ -8,10 +8,11 @@ import { KKPhimProvider } from './kkphim.js';
 import { OPhimProvider } from './ophim.js';
 import { VsmovProvider } from './vsmov.js';
 import { NguoncProvider } from './nguonc.js';
+import { VodPhimProvider } from './vodphim.js';
 
 /**
- * Trả về danh sách providers theo đúng thứ tự ưu tiên (như PHP).
- * KKPhim -> OPhim -> VSMov -> NguonC
+ * Trả về danh sách providers theo đúng thứ tự ưu tiên.
+ * KKPhim -> OPhim -> VSMov -> NguonC -> VodPhim (fallback cuối cùng)
  */
 export function getProviders(cache: CacheStore, ctx: ExecutionContext): Provider[] {
   return [
@@ -19,6 +20,7 @@ export function getProviders(cache: CacheStore, ctx: ExecutionContext): Provider
     new OPhimProvider(cache, ctx),
     new VsmovProvider(cache, ctx),
     new NguoncProvider(cache, ctx),
+    new VodPhimProvider(cache, ctx),
   ];
 }
 
